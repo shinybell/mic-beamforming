@@ -1,8 +1,6 @@
-# リアルタイム音声処理システム
+# mic-beamforming
 
 NI-DAQmxからの電圧データをリアルタイムで処理し、音声として復元・出力するシステムです。
-
-元のリポジトリ: [mic-beamforming](https://github.com/shinybell/mic-beamforming)
 
 ## 機能
 
@@ -36,8 +34,3 @@ python main.py
 ```
 
 デフォルトで`Dev1/ai0`からデータを読み取ります。デバイス名を変更する場合は、コード内の`"Dev1/ai0"`を編集してください。
-
-## ライセンス
-
-（ライセンス情報を追加してください）
-
