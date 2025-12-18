@@ -30,7 +30,7 @@ audio_state = {
     # List of Band Stop Filters
     # Each item: {"enabled": bool, "low": float, "high": float, "b": array, "a": array, "id": int}
     "band_stop_filters": [],
-    "latest_chunk": None,  # For visualization
+    "latest_chunks": [None, None],  # For visualization, [ch0, ch1]
 }
 
 # Queue
@@ -71,12 +71,13 @@ def audio_callback(outdata, frames, time, status):
         print(status, file=sys.stderr)
 
     try:
-        data = audio_queue.get(block=False)
+        data = audio_queue.get(block=False)  # data is [ch0, ch1]
+
+        # Combine for output
+        combined = (data[0] + data[1]) / 2
 
         # --- Processing ---
-        processed = data
-
-        # 1. High Pass
+        processed = combined  # 1. High Pass
         if audio_state["high_pass_enabled"] and audio_state["hp_b"] is not None:
             processed = signal.filtfilt(
                 audio_state["hp_b"], audio_state["hp_a"], processed
@@ -94,7 +95,7 @@ def audio_callback(outdata, frames, time, status):
         processed = np.clip(processed, -1.0, 1.0)
 
         # Free run update for visualization
-        audio_state["latest_chunk"] = processed
+        audio_state["latest_chunks"] = data  # data is [ch0, ch1]
 
         # --- Output ---
         if len(processed) < frames:
@@ -120,15 +121,8 @@ def daq_thread_func(stop_event):
                 data = task.read(number_of_samples_per_channel=CHUNK_SIZE)
                 np_data = np.array(data, dtype=np.float32)
                 # For multichannel, data is list of arrays, one per channel
-                # Combine channels, e.g., average for mono output
-                if len(np_data) == 2:
-                    combined = (
-                        np_data[0] + np_data[1]
-                    ) / 2  # Simple average for beamforming
-                else:
-                    combined = np_data[0] if len(np_data) > 0 else np.zeros(CHUNK_SIZE)
                 try:
-                    audio_queue.put(combined, block=True, timeout=1)
+                    audio_queue.put([np_data[0], np_data[1]], block=True, timeout=1)
                 except queue.Full:
                     pass
             except Exception as e:
@@ -141,7 +135,7 @@ class AudioApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Real-time Audio Equalizer - Multichannel")
-        self.root.geometry("600x800")
+        self.root.geometry("600x1000")
 
         # --- Dark Mode Colors ---
         self.bg_color = "#2b2b2b"
@@ -199,21 +193,33 @@ class AudioApp:
         plot_frame = ttk.Frame(main_container)
         plot_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
 
-        self.fig = Figure(figsize=(5, 3), dpi=100, facecolor=self.bg_color)
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_title("Frequency Spectrum", color=self.fg_color)
-        self.ax.set_xlabel("Frequency (Hz)", color=self.fg_color)
-        self.ax.set_ylabel("Magnitude (dB)", color=self.fg_color)
-        self.ax.set_facecolor(self.bg_color)
-        self.ax.tick_params(colors=self.fg_color)
-        for spine in self.ax.spines.values():
+        self.fig = Figure(figsize=(5, 6), dpi=100, facecolor=self.bg_color)
+        self.ax0 = self.fig.add_subplot(211)
+        self.ax0.set_title("Channel 0 (ai0) Frequency Spectrum", color=self.fg_color)
+        self.ax0.set_xlabel("Frequency (Hz)", color=self.fg_color)
+        self.ax0.set_ylabel("Magnitude (dB)", color=self.fg_color)
+        self.ax0.set_facecolor(self.bg_color)
+        self.ax0.tick_params(colors=self.fg_color)
+        for spine in self.ax0.spines.values():
             spine.set_edgecolor(self.panel_bg)
+        self.ax0.set_xlim(0, SAMPLE_RATE / 2)
+        self.ax0.set_ylim(-60, 40)
+        self.ax0.grid(True, color=self.panel_bg, linestyle="--", alpha=0.5)
 
-        self.ax.set_xlim(0, SAMPLE_RATE / 2)
-        self.ax.set_ylim(-60, 40)
-        self.ax.grid(True, color=self.panel_bg, linestyle="--", alpha=0.5)
+        self.ax1 = self.fig.add_subplot(212)
+        self.ax1.set_title("Channel 1 (ai1) Frequency Spectrum", color=self.fg_color)
+        self.ax1.set_xlabel("Frequency (Hz)", color=self.fg_color)
+        self.ax1.set_ylabel("Magnitude (dB)", color=self.fg_color)
+        self.ax1.set_facecolor(self.bg_color)
+        self.ax1.tick_params(colors=self.fg_color)
+        for spine in self.ax1.spines.values():
+            spine.set_edgecolor(self.panel_bg)
+        self.ax1.set_xlim(0, SAMPLE_RATE / 2)
+        self.ax1.set_ylim(-60, 40)
+        self.ax1.grid(True, color=self.panel_bg, linestyle="--", alpha=0.5)
 
-        (self.line,) = self.ax.plot([], [], lw=1, color=self.accent_color)
+        (self.line0,) = self.ax0.plot([], [], lw=1, color=self.accent_color)
+        (self.line1,) = self.ax1.plot([], [], lw=1, color=self.accent_color)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.draw()
@@ -453,11 +459,11 @@ class AudioApp:
 
     def update_plot(self):
         """Fetch latest audio data and update the plot."""
-        chunk = audio_state["latest_chunk"]
-        if chunk is not None:
-            # Calculate FFT
-            N = len(chunk)
-            yf = np.fft.fft(chunk)
+        chunks = audio_state["latest_chunks"]
+        if chunks[0] is not None:
+            # Calculate FFT for ch0
+            N = len(chunks[0])
+            yf = np.fft.fft(chunks[0])
             xf = np.fft.fftfreq(N, 1 / SAMPLE_RATE)
 
             # Take positive half
@@ -467,8 +473,24 @@ class AudioApp:
             # Use log scale (dB) with safe log
             magnitude_db = 20 * np.log10(np.maximum(magnitude, 1e-6))
 
-            self.line.set_data(xf, magnitude_db)
-            self.canvas.draw_idle()
+            self.line0.set_data(xf, magnitude_db)
+
+        if chunks[1] is not None:
+            # Calculate FFT for ch1
+            N = len(chunks[1])
+            yf = np.fft.fft(chunks[1])
+            xf = np.fft.fftfreq(N, 1 / SAMPLE_RATE)
+
+            # Take positive half
+            xf = xf[: N // 2]
+            magnitude = 2.0 / N * np.abs(yf[: N // 2])
+
+            # Use log scale (dB) with safe log
+            magnitude_db = 20 * np.log10(np.maximum(magnitude, 1e-6))
+
+            self.line1.set_data(xf, magnitude_db)
+
+        self.canvas.draw_idle()
 
         self.root.after(50, self.update_plot)
 
