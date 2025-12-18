@@ -13,14 +13,19 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
-# Configuration
-SAMPLE_RATE = 20000
-CHUNK_SIZE = 2048
+import src.config as config
+from src.beamformer import FreqDomainBeamformer
+
+# Configuration (Driven by config.py now)
+SAMPLE_RATE = config.SAMPLE_RATE
+CHUNK_SIZE = config.CHUNK_SIZE
 QUEUE_SIZE = 20 
 
 # Global State for Audio Processing
 audio_state = {
     "gain": 1.2,
+    "target_angle": 0.0, # Degrees
+    "beamformer": None,  # Instance
     "high_pass_cutoff": 80,
     "high_pass_enabled": True,
     # Filter coefficients
@@ -37,7 +42,12 @@ audio_state = {
 audio_queue = queue.Queue(maxsize=QUEUE_SIZE)
 
 def update_filters():
-    """Recalculate filter coefficients based on current state."""
+    """Recalculate filter coefficients and beamformer weights based on current state."""
+    
+    # Beamforming
+    if audio_state["beamformer"] is not None:
+        audio_state["beamformer"].update_steering_vector(audio_state["target_angle"])
+
     nyquist = SAMPLE_RATE / 2
     
     # High Pass
@@ -68,7 +78,20 @@ def audio_callback(outdata, frames, time, status):
         data = audio_queue.get(block=False)
         
         # --- Processing ---
-        processed = data
+        
+        # 0. Beamforming (Multi-channel -> Single-channel)
+        if audio_state["beamformer"] is not None:
+            # Check if input data matches expected channel count
+            # data shape should be (CHUNK_SIZE, num_mics)
+            if data.ndim == 2 and data.shape[1] == len(config.MIC_CHANNELS):
+                 processed = audio_state["beamformer"].apply(data)
+            else:
+                 # Fallback: Just take the first channel if shape doesn't match
+                 # flatten or slice
+                 print("Channel mismatch or single channel input", file=sys.stderr)
+                 processed = data[:, 0] if data.ndim == 2 else data
+        else:
+             processed = data[:, 0] if data.ndim == 2 else data
         
         # 1. High Pass
         if audio_state["high_pass_enabled"] and audio_state["hp_b"] is not None:
@@ -102,13 +125,21 @@ def daq_thread_func(stop_event):
     """Producer thread that reads from DAQ."""
     print("DAQ Thread Started")
     with nidaqmx.Task() as task:
-        task.ai_channels.add_ai_voltage_chan("Dev1/ai0")
+        # Add all configured channels
+        for channel in config.MIC_CHANNELS:
+            task.ai_channels.add_ai_voltage_chan(channel)
+            
         task.timing.cfg_samp_clk_timing(SAMPLE_RATE, samps_per_chan=CHUNK_SIZE * 10)
         
         while not stop_event.is_set():
             try:
+                # Read multi-channel data
+                # Returns list of lists (num_channels, num_samples) or single list
                 data = task.read(number_of_samples_per_channel=CHUNK_SIZE)
-                np_data = np.array(data, dtype=np.float32)
+                
+                # Convert to numpy array (float32) and Transpose to (samples, channels)
+                np_data = np.array(data, dtype=np.float32).T
+                
                 try:
                     audio_queue.put(np_data, block=True, timeout=1)
                 except queue.Full:
@@ -150,6 +181,10 @@ class AudioApp:
 
         # Initialize filter ID counter
         self.filter_id_counter = 0
+
+        # Initialize Beamformer
+        audio_state["beamformer"] = FreqDomainBeamformer()
+        update_filters()
 
         # --- GUI Layout ---
         # Main Container
@@ -203,6 +238,26 @@ class AudioApp:
 
         # Content inside Scrollable Frame
         
+        # --- Beamforming Control ---
+        bf_frame = ttk.LabelFrame(self.scrollable_frame, text="Beamforming Direction", padding="10")
+        bf_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        self.angle_val = tk.DoubleVar(value=audio_state["target_angle"])
+        
+        # Angle Label with callback
+        self.angle_label = ttk.Label(bf_frame, text=f"{int(self.angle_val.get())}°")
+        self.angle_label.pack(anchor=tk.E)
+        
+        def on_angle_change(val):
+            angle = float(val)
+            self.angle_label.config(text=f"{int(angle)}°")
+            audio_state["target_angle"] = angle
+            # Only update if beamformer exists
+            if audio_state["beamformer"]:
+                 audio_state["beamformer"].update_steering_vector(angle)
+                 
+        ttk.Scale(bf_frame, from_=-90, to=90, variable=self.angle_val, command=on_angle_change).pack(fill=tk.X)
+
         # --- Global Gain ---
         gain_frame = ttk.LabelFrame(self.scrollable_frame, text="Master Gain", padding="10")
         gain_frame.pack(fill=tk.X, pady=5, padx=5)
