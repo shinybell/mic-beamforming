@@ -258,6 +258,27 @@ class AudioApp:
                  
         ttk.Scale(bf_frame, from_=-90, to=90, variable=self.angle_val, command=on_angle_change).pack(fill=tk.X)
 
+        # --- Mic Spacing Control ---
+        spacing_frame = ttk.LabelFrame(self.scrollable_frame, text="Mic Spacing (m)", padding="10")
+        spacing_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        # Default from config (calculate from positions if possible, or just default)
+        # Assuming 2 mics symmetric: spacing is dist between them = 0.76
+        initial_spacing = 0.76
+        self.spacing_val = tk.DoubleVar(value=initial_spacing)
+        
+        self.spacing_label = ttk.Label(spacing_frame, text=f"{self.spacing_val.get():.2f} m")
+        self.spacing_label.pack(anchor=tk.E)
+        
+        def on_spacing_change(val):
+            spacing = float(val)
+            self.spacing_label.config(text=f"{spacing:.2f} m")
+            # Update beamformer geometry
+            if audio_state["beamformer"]:
+                 audio_state["beamformer"].update_geometry(spacing)
+
+        ttk.Scale(spacing_frame, from_=0.01, to=1.0, variable=self.spacing_val, command=on_spacing_change).pack(fill=tk.X)
+
         # --- Global Gain ---
         gain_frame = ttk.LabelFrame(self.scrollable_frame, text="Master Gain", padding="10")
         gain_frame.pack(fill=tk.X, pady=5, padx=5)

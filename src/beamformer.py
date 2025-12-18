@@ -18,9 +18,40 @@ class FreqDomainBeamformer:
         self.steering_vector = np.ones((self.num_bins, self.num_mics), dtype=np.complex64)
         
         # Initialize with look direction 0 degrees (broadside)
-        self.update_steering_vector(0.0)
+        self.current_angle = 0.0
+        self.update_steering_vector(self.current_angle)
+
+    def update_geometry(self, spacing):
+        """
+        Update the microphone positions based on a new spacing (in meters).
+        Effectively assumes a linear array centered at 0.
+        Spacing is the distance between individual elements? Or total aperture?
+        Let's assume 'spacing' is the distance between ADJACENT elements.
+        Or simpler for 2 mics: Total distance between them.
+        
+        For 2 mics:
+        Mic 0: -spacing/2
+        Mic 1: +spacing/2
+        """
+        # Calculate new positions (centered linear array)
+        if self.num_mics == 2:
+            self.mic_positions = np.array([
+                [-spacing / 2, 0.0, 0.0],
+                [ spacing / 2, 0.0, 0.0]
+            ])
+        else:
+            # Fallback for >2 mics (assume uniform linear array)
+            # Center it
+            indices = np.arange(self.num_mics) - (self.num_mics - 1) / 2
+            xs = indices * spacing
+            self.mic_positions = np.zeros((self.num_mics, 3))
+            self.mic_positions[:, 0] = xs
+            
+        # Recalculate steering vector for current angle with new geometry
+        self.update_steering_vector(self.current_angle)
 
     def update_steering_vector(self, theta_deg):
+        self.current_angle = theta_deg
         """
         Update delays for a specific angle theta (degrees).
         Theta is the angle relative to the 'front' (Y-axis) or 'side' (X-axis) depending on convention.
