@@ -13,8 +13,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
-import src.config as config
-from src.beamformer import FreqDomainBeamformer
+import config as config
+from beamformer import FreqDomainBeamformer
 
 # Configuration (Driven by config.py now)
 SAMPLE_RATE = config.SAMPLE_RATE
@@ -192,7 +192,6 @@ class AudioApp:
         main_container.pack(fill=tk.BOTH, expand=True)
         
         # 1. Spectrum Plot (Dark Mode)
-        matplotlib.style.use('dark_background')
         plot_frame = ttk.Frame(main_container)
         plot_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
         

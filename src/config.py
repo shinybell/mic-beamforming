@@ -1,7 +1,7 @@
 import numpy as np
 
 # Sampling Rate
-SAMPLE_RATE = 20000
+SAMPLE_RATE = 10000
 
 # Chunk Size
 CHUNK_SIZE = 2048
@@ -9,8 +9,8 @@ CHUNK_SIZE = 2048
 # Microphone Channels (DAQ)
 # Ensure these match your actual hardware connection
 MIC_CHANNELS = [
-    "Dev1/ai0",
-    "Dev1/ai1"
+    "Dev10/ai0",
+    "Dev10/ai1"
 ]
 
 # Speed of Sound (m/s)

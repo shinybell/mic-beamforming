@@ -1,5 +1,5 @@
 import numpy as np
-import src.config as config
+import config as config
 
 class FreqDomainBeamformer:
     def __init__(self, mic_positions=config.MIC_POSITIONS, sample_rate=config.SAMPLE_RATE, chunk_size=config.CHUNK_SIZE):
