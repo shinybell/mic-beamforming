@@ -29,6 +29,19 @@ if nyquist > HIGH_PASS_CUTOFF:
 else:
     FILTER_ENABLED = False
 
+# バンドストップフィルタ（特定の帯域を除去）
+# 例: 4000Hz〜5000Hzを除去したい場合
+BAND_STOP_LOW = 4000
+BAND_STOP_HIGH = 5000
+if nyquist > BAND_STOP_HIGH:
+    # 帯域阻止フィルタの設計
+    low = BAND_STOP_LOW / nyquist
+    high = BAND_STOP_HIGH / nyquist
+    b_stop, a_stop = signal.butter(4, [low, high], btype='bandstop', analog=False)
+    BAND_STOP_ENABLED = True
+else:
+    BAND_STOP_ENABLED = False
+
 # エコーキャンセレーション用のバッファ
 echo_buffer = np.zeros(CHUNK_SIZE * 2)
 
@@ -52,6 +65,10 @@ def enhance_audio_quality(audio_data):
         filtered = signal.filtfilt(b, a, audio_data)
     else:
         filtered = audio_data
+
+    # 1.5 バンドストップフィルタ適用
+    if BAND_STOP_ENABLED:
+        filtered = signal.filtfilt(b_stop, a_stop, filtered)
     
     # 2. ノイズゲート（小さなノイズを除去）
     rms = np.sqrt(np.mean(filtered**2))
