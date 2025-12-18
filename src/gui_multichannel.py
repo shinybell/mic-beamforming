@@ -15,7 +15,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 # Configuration
-SAMPLE_RATE = 20000
+SAMPLE_RATE = 10000
 CHUNK_SIZE = 2048
 QUEUE_SIZE = 20
 
@@ -189,7 +189,7 @@ class AudioApp:
         main_container.pack(fill=tk.BOTH, expand=True)
 
         # 1. Spectrum Plot (Dark Mode)
-        matplotlib.style.use("dark_background")
+        # matplotlib.style.use("dark_background")
         plot_frame = ttk.Frame(main_container)
         plot_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
 
