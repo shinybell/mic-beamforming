@@ -1,8 +1,9 @@
 """
-NIDAQ Dual-Microphone Beamforming System
-=========================================
+NIDAQ Dual-Microphone Beamforming System (改良版)
+=================================================
 
-NIDAQハードウェアの2つのマイクを使用したリアルタイムビームフォーミング
+正しいDelay-and-Sumビームフォーミングを実装
+時間領域での遅延補償による話者分離
 
 必要なライブラリ:
 pip install numpy scipy sounddevice nidaqmx
@@ -12,12 +13,7 @@ pip install numpy scipy sounddevice nidaqmx
 2. nidaq_config.pyで設定を確認
 3. このスクリプトを実行
 4. 目的角度を入力
-5. ビームフォーミングされた音声がスピーカーから出力（Windows/Macに対応）
-
-特徴:
-- リアルタイムストリーミング処理（超低遅延）
-- 入力直後に処理して即座に出力
-- Windows/Mac両対応したスピーカー選択
+5. ビームフォーミングされた音声がスピーカーから出力
 """
 
 import numpy as np
@@ -31,7 +27,7 @@ import nidaq_config as config
 
 
 class NIDAQBeamformer:
-    """NIDAQを使用したビームフォーミングクラス"""
+    """NIDAQを使用したビームフォーミングクラス（改良版）"""
     
     def __init__(self):
         """初期化"""
@@ -50,23 +46,14 @@ class NIDAQBeamformer:
         # 実行状態
         self.is_running = False
         
-        # 周波数ビンを事前計算
-        self.freqs = np.fft.rfftfreq(self.chunk_size, d=1.0/self.sample_rate)
-        self.num_bins = len(self.freqs)
-        
-        # ステアリングベクトル（重み）
-        self.steering_vector = np.ones((self.num_bins, self.num_mics), dtype=np.complex64)
-        
         # 現在の目的角度
         self.current_angle = config.DEFAULT_TARGET_ANGLE
         
+        # 遅延サンプル数（後で計算）
+        self.delay_samples = 0
+        
         # ハイパスフィルタの設計
         self.setup_filters()
-        
-        
-        # エコーキャンセレーション用バッファ
-        if config.ENABLE_ECHO_CANCELLATION:
-            self.echo_buffer = np.zeros(config.ECHO_BUFFER_SIZE)
         
         # レベルメーター用
         self.chunk_counter = 0
@@ -79,17 +66,9 @@ class NIDAQBeamformer:
         print(f"チャンクサイズ: {self.chunk_size} samples ({self.chunk_size/self.sample_rate*1000:.1f} ms)")
         print(f"マイク数: {self.num_mics}")
         print(f"マイク間距離: {config.MIC_SPACING*100:.1f} cm")
-        print(f"周波数ビン数: {self.num_bins}")
     
     def select_output_device(self):
-        """
-        出力デバイスを自動選択（Windows/Mac対応）
-        
-        Returns:
-        --------
-        int or None
-            出力デバイスID（Noneの場合はデフォルト）
-        """
+        """出力デバイスを自動選択（Windows/Mac対応）"""
         import platform
         
         devices = sd.query_devices()
@@ -99,16 +78,13 @@ class NIDAQBeamformer:
         
         # Windowsの場合
         if os_type == "Windows":
-            # Windowsスピーカーを探す
             for i, device in enumerate(devices):
                 name_lower = device['name'].lower()
                 if device['max_output_channels'] >= 1:
-                    # スピーカー、ヘッドフォン、またはデフォルトデバイスを優先
                     if any(keyword in name_lower for keyword in ['speaker', 'スピーカー', 'headphone', 'ヘッドフォン', 'default']):
                         print(f"出力デバイス: [{i}] {device['name']}")
                         return i
             
-            # 見つからない場合はデフォルト
             try:
                 default_output = sd.query_devices(kind='output')
                 print(f"出力デバイス: [デフォルト] {default_output['name']}")
@@ -119,14 +95,12 @@ class NIDAQBeamformer:
         
         # Macの場合
         elif os_type == "Darwin":
-            # MacBookスピーカーを探す
             for i, device in enumerate(devices):
                 name_lower = device['name'].lower()
                 if ('macbook' in name_lower or 'built-in' in name_lower) and device['max_output_channels'] >= 1:
                     print(f"出力デバイス: [{i}] {device['name']}")
                     return i
             
-            # 見つからない場合はデフォルト
             try:
                 default_output = sd.query_devices(kind='output')
                 print(f"出力デバイス: [デフォルト] {default_output['name']}")
@@ -135,11 +109,9 @@ class NIDAQBeamformer:
                 print("出力デバイス: デフォルト")
                 return None
         
-        # その他のOS
         else:
             print(f"出力デバイス: デフォルト（{os_type}）")
             return None
-
     
     def setup_filters(self):
         """フィルタの設計"""
@@ -156,46 +128,47 @@ class NIDAQBeamformer:
             self.filter_enabled = False
             print("ハイパスフィルタ: 無効")
     
-    def update_steering_vector(self, theta_deg):
+    def calculate_delay(self, theta_deg):
         """
-        振幅ベースのビームフォーミングパラメータを更新
+        指定角度に対する時間遅延を計算
         
         Parameters:
         -----------
         theta_deg : float
             目的角度（度）
-            -90度 = 左側（左マイク優先）
-            0度 = 正面（両マイク均等）
-            90度 = 右側（右マイク優先）
+            -90度 = 左側（左マイクが音源に近い）
+            0度 = 正面（両マイク等距離）
+            90度 = 右側（右マイクが音源に近い）
+        
+        Returns:
+        --------
+        delay_samples : int
+            遅延サンプル数
         """
         self.current_angle = theta_deg
+        theta_rad = np.deg2rad(theta_deg)
         
-        # 振幅ベースの重み付けを計算
-        # -90度 → 左マイク100%, 右マイク0%
-        # 0度   → 左マイク50%,  右マイク50%
-        # 90度  → 左マイク0%,   右マイク100%
+        # マイク間距離
+        d = config.MIC_SPACING
         
-        # 角度を-90〜90の範囲に正規化
-        normalized_angle = np.clip(theta_deg, -90, 90) / 90.0  # -1.0 〜 1.0
+        # 音源方向からの時間差
+        # sin(theta) = 0 のとき（正面）: 時間差なし
+        # sin(theta) = 1 のとき（右側）: 最大時間差 d/c
+        # sin(theta) = -1 のとき（左側）: 最大時間差 -d/c
+        time_delay = (d * np.sin(theta_rad)) / config.SPEED_OF_SOUND
         
-        # 左右の重み（振幅ベース）
-        # normalized_angle = -1.0 → left_weight = 1.0, right_weight = 0.0
-        # normalized_angle =  0.0 → left_weight = 0.5, right_weight = 0.5
-        # normalized_angle =  1.0 → left_weight = 0.0, right_weight = 1.0
-        self.left_weight = (1.0 - normalized_angle) / 2.0
-        self.right_weight = (1.0 + normalized_angle) / 2.0
+        # サンプル数に変換
+        delay_samples = int(abs(time_delay) * self.sample_rate)
         
-        # 反対側の抑制係数（より強い分離のため）
-        self.suppression_factor = 0.3  # 反対側を30%に減衰
+        print(f"\n遅延計算: {theta_deg}度")
+        print(f"  時間遅延: {time_delay*1000:.3f} ms")
+        print(f"  遅延サンプル数: {delay_samples}")
         
-        print(f"\n振幅ベースビームフォーミング設定: {theta_deg}度")
-        print(f"  左マイク重み: {self.left_weight:.2f}")
-        print(f"  右マイク重み: {self.right_weight:.2f}")
-        print(f"  抑制係数: {self.suppression_factor:.2f}")
+        return delay_samples
     
     def apply_beamforming(self, multichannel_chunk):
         """
-        振幅ベースのビームフォーミングを適用
+        Delay-and-Sumビームフォーミングを適用（時間領域）
         
         Parameters:
         -----------
@@ -213,36 +186,28 @@ class NIDAQBeamformer:
         left_channel = multichannel_chunk[:, 0]
         right_channel = multichannel_chunk[:, 1]
         
-        # 振幅ベースの重み付け
-        if self.current_angle < 0:
-            # 左側を強調（-90度に近い）
-            # 左チャンネルをそのまま、右チャンネルを抑制
-            output = left_channel - self.suppression_factor * right_channel
-        elif self.current_angle > 0:
-            # 右側を強調（90度に近い）
-            # 右チャンネルをそのまま、左チャンネルを抑制
-            output = right_channel - self.suppression_factor * left_channel
-        else:
-            # 正面（0度）
+        if self.current_angle < -10:  # 左側を強調
+            # 左マイクが音源に近い
+            # 右マイクの信号を遅延させて左マイクに合わせる
+            delayed_right = np.pad(right_channel, (self.delay_samples, 0), mode='constant')[:-self.delay_samples or None]
+            # 加算して強調、減算して抑制
+            output = left_channel + delayed_right - 0.5 * right_channel
+            
+        elif self.current_angle > 10:  # 右側を強調
+            # 右マイクが音源に近い
+            # 左マイクの信号を遅延させて右マイクに合わせる
+            delayed_left = np.pad(left_channel, (self.delay_samples, 0), mode='constant')[:-self.delay_samples or None]
+            # 加算して強調、減算して抑制
+            output = right_channel + delayed_left - 0.5 * left_channel
+            
+        else:  # 正面（0度付近）
             # 両チャンネルを均等に混合
             output = (left_channel + right_channel) / 2.0
         
         return output.astype(np.float32)
     
     def enhance_audio_quality(self, audio_data):
-        """
-        音質向上処理
-        
-        Parameters:
-        -----------
-        audio_data : ndarray
-            入力音声データ
-        
-        Returns:
-        --------
-        ndarray
-            処理済み音声データ
-        """
+        """音質向上処理"""
         # 1. ハイパスフィルタ（低周波ノイズ除去）
         if self.filter_enabled:
             filtered = signal.filtfilt(self.filter_b, self.filter_a, audio_data)
@@ -252,7 +217,7 @@ class NIDAQBeamformer:
         # 2. ノイズゲート（小さなノイズを除去）
         rms = np.sqrt(np.mean(filtered**2))
         if rms < config.NOISE_GATE_THRESHOLD:
-            filtered = filtered * 0.1  # ノイズを大幅に減衰
+            filtered = filtered * 0.1
         
         # 3. ゲイン調整
         filtered = filtered * config.GAIN
@@ -260,46 +225,27 @@ class NIDAQBeamformer:
         # 4. クリッピング防止
         filtered = np.clip(filtered, -1.0, 1.0)
         
-        # 5. エコーキャンセレーション（オプション）
-        if config.ENABLE_ECHO_CANCELLATION:
-            if len(self.echo_buffer) >= len(filtered):
-                echo_reduction = self.echo_buffer[:len(filtered)] * 0.1
-                filtered = filtered - echo_reduction
-            
-            # エコーバッファを更新
-            self.echo_buffer = np.roll(self.echo_buffer, -len(filtered))
-            self.echo_buffer[-len(filtered):] = filtered
-        
         return filtered
     
     def audio_output_callback(self, outdata, frames, time_info, status):
-        """
-        Sounddeviceの出力コールバック
-        キューからデータを取得してスピーカーに出力
-        """
+        """Sounddeviceの出力コールバック"""
         if status:
             print(f"出力Status: {status}", file=sys.stderr)
         
         try:
-            # キューからデータを取得
             data = self.audio_queue.get(block=False)
-            
-            # 音質向上処理を適用
             processed_data = self.enhance_audio_quality(data)
             
-            # データサイズチェック
             if len(processed_data) < frames:
                 outdata[:len(processed_data)] = processed_data.reshape(-1, 1)
                 outdata[len(processed_data):] = 0
-                print("Buffer underrun (partial)", file=sys.stderr)
             else:
                 outdata[:] = processed_data.reshape(-1, 1)
         
         except queue.Empty:
-            # キューが空の場合は無音を出力
             outdata[:] = 0
             if self.is_running:
-                print("Buffer underflow: Outputting silence", file=sys.stderr)
+                print("Buffer underflow", file=sys.stderr)
     
     def show_level_meter(self, data):
         """簡易レベルメーター表示"""
@@ -310,42 +256,30 @@ class NIDAQBeamformer:
         if self.chunk_counter % config.LEVEL_METER_UPDATE_INTERVAL != 0:
             return
         
-        # RMS計算
         rms = np.sqrt(np.mean(data**2))
         
-        # dB変換
         if rms > 1e-10:
             db = 20 * np.log10(rms)
         else:
             db = -100
         
-        # バー表示
         bar_length = int(max(0, min(50, (db + 60) / 60 * 50)))
         bar = "█" * bar_length + "░" * (50 - bar_length)
         
         print(f"\rLevel: [{bar}] {db:+6.1f} dB", end='', flush=True)
     
     def run(self, target_angle=None, duration=None):
-        """
-        ビームフォーミングを実行
-        
-        Parameters:
-        -----------
-        target_angle : float or None
-            目的角度（度）。Noneの場合はユーザーに入力を求める
-        duration : float or None
-            実行時間（秒）。Noneの場合は手動停止まで継続
-        """
+        """ビームフォーミングを実行"""
         # 目的角度を設定
         if target_angle is None:
             print("\n目的角度を入力してください（度）:")
-            print("  0度 = 正面（マイクアレイに垂直）")
-            print("  90度 = 右側（エンドファイア）")
-            print("  -90度 = 左側")
+            print("  -90度 = 左側の話者")
+            print("  0度 = 正面（両方）")
+            print("  90度 = 右側の話者")
             target_angle = float(input("> "))
         
-        # ステアリングベクトルを更新
-        self.update_steering_vector(target_angle)
+        # 遅延を計算
+        self.delay_samples = self.calculate_delay(target_angle)
         
         # 実行時間を設定
         if duration is None:
@@ -366,61 +300,48 @@ class NIDAQBeamformer:
         start_time = time.time()
         
         try:
-            # 出力ストリームを開始（Windows/Mac自動選択）
             with sd.OutputStream(
-                device=self.output_device,  # 自動選択されたデバイス
+                device=self.output_device,
                 samplerate=self.sample_rate,
                 channels=1,
                 blocksize=self.chunk_size,
                 callback=self.audio_output_callback
             ):
-                # NIDAQタスクを開始
                 with nidaqmx.Task() as task:
-                    # マイクチャンネルを追加
                     for channel in config.MIC_CHANNELS:
                         task.ai_channels.add_ai_voltage_chan(channel)
                     
-                    # タイミング設定
                     task.timing.cfg_samp_clk_timing(
                         self.sample_rate,
                         samps_per_chan=self.chunk_size * 10
                     )
                     
                     print("🎤 録音中... 🔊 再生中...\n")
-                    print("ℹ️  リアルタイムストリーミング処理:")
-                    print("   入力 → ビームフォーミング → 出力 (遅延: ~100ms)\n")
                     
                     while self.is_running:
-                        # 時間チェック
                         if duration and (time.time() - start_time) >= duration:
                             break
                         
-                        # ===== ストリーミング処理ループ =====
-                        # 1. NIDAQからリアルタイムでデータを読み取り
-                        # 戻り値: list of lists [[ch0_samples], [ch1_samples]]
+                        # NIDAQからデータを読み取り
                         data = task.read(number_of_samples_per_channel=self.chunk_size)
-                        
-                        # 2. numpy配列に変換して転置
-                        # shape: (num_channels, chunk_size) -> (chunk_size, num_channels)
                         np_data = np.array(data, dtype=np.float32).T
                         
-                        # 3. ビームフォーミングを即座に適用（周波数領域処理）
+                        # ビームフォーミングを適用
                         beamformed = self.apply_beamforming(np_data)
                         
-                        # 4. レベルメーター表示
+                        # レベルメーター表示
                         self.show_level_meter(beamformed)
                         
-                        # 5. 処理済み音声を即座にキューに追加
-                        # → 出力コールバックが自動的に取得してスピーカーから再生
+                        # キューに追加
                         try:
                             self.audio_queue.put(beamformed, block=True, timeout=1)
                         except queue.Full:
-                            print("\nQueue full: Dropping data", file=sys.stderr)
+                            print("\nQueue full", file=sys.stderr)
         
         except KeyboardInterrupt:
             print("\n\n停止しました")
         except Exception as e:
-            print(f"\n\nエラーが発生しました: {e}")
+            print(f"\n\nエラー: {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -453,7 +374,6 @@ def list_nidaq_devices():
     
     except ImportError:
         print("\n❌ nidaqmxライブラリがインストールされていません")
-        print("インストール: pip install nidaqmx")
         return False
     except Exception as e:
         print(f"\n❌ NIDAQデバイスの検出に失敗: {e}")
@@ -463,25 +383,19 @@ def list_nidaq_devices():
 def main():
     """メイン関数"""
     print("=" * 60)
-    print("NIDAQ Dual-Microphone Beamforming")
+    print("NIDAQ Dual-Microphone Beamforming (改良版)")
     print("=" * 60)
     
-    # NIDAQデバイスを確認
     if not list_nidaq_devices():
-        print("\n設定を確認してください:")
-        print("1. NIDAQハードウェアが接続されているか")
-        print("2. NI-DAQmxドライバがインストールされているか")
-        print("3. nidaq_config.pyのDEVICE_NAMEが正しいか")
+        print("\n設定を確認してください")
         return
     
-    # ビームフォーマーを初期化
     try:
         beamformer = NIDAQBeamformer()
     except Exception as e:
         print(f"\n❌ 初期化エラー: {e}")
         return
     
-    # ビームフォーミングを実行
     beamformer.run()
 
 
