@@ -145,6 +145,8 @@ def audio_callback(outdata, frames, time, status):
 def daq_thread_func(stop_event):
     """Producer thread that reads from DAQ."""
     print("DAQ Thread Started")
+    from nidaqmx.constants import AcquisitionType
+    
     try:
         with nidaqmx.Task() as task:
             # Add all configured channels
@@ -155,7 +157,7 @@ def daq_thread_func(stop_event):
                      print(f"DAQ Setup Error (Channel {channel}): {e}")
                      return # Exit thread if setup fails
 
-            task.timing.cfg_samp_clk_timing(SAMPLE_RATE, samps_per_chan=CHUNK_SIZE * 10)
+            task.timing.cfg_samp_clk_timing(SAMPLE_RATE, samps_per_chan=CHUNK_SIZE * 10, sample_mode=AcquisitionType.CONTINUOUS)
             
             # Explicitly start (optional, but good practice)
             try:
@@ -168,6 +170,12 @@ def daq_thread_func(stop_event):
             
             while not stop_event.is_set():
                 try:
+                    # Check available samples
+                    avail = task.in_stream.avail_samp_per_chan
+                    if avail < CHUNK_SIZE:
+                        time.sleep(0.001)
+                        continue
+                        
                     # Read multi-channel data
                     data = task.read(number_of_samples_per_channel=CHUNK_SIZE, timeout=10.0)
                     
