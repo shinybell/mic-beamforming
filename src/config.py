@@ -9,8 +9,8 @@ CHUNK_SIZE = 2048
 # Microphone Channels (DAQ)
 # Ensure these match your actual hardware connection
 MIC_CHANNELS = [
-    "Dev10/ai0",
-    "Dev10/ai1"
+    "Dev7/ai0",
+    "Dev7/ai1"
 ]
 
 # Speed of Sound (m/s)
