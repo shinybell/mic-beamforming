@@ -12,6 +12,7 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import time
+from nidaqmx.constants import AcquisitionType
 
 import config as config
 from beamformer import DelayAndSumBeamformer, MVDRBeamformer
@@ -94,7 +95,7 @@ def audio_callback(outdata, frames, time, status):
             rms_levels = np.sqrt(np.mean(data**2, axis=0))
             audio_state["input_levels"] = rms_levels.tolist()
 
-        # Store raw input for visualization (first channel)
+        # Store raw input for visualization (ALL channels)
         if data.ndim == 2:
             audio_state["latest_input_chunk"] = data
         else:
@@ -102,15 +103,7 @@ def audio_callback(outdata, frames, time, status):
 
         # 0. Beamforming (Multi-channel -> Single-channel)
         if audio_state["beamformer"] is not None:
-            # Check if input data matches expected channel count
-            # data shape should be (CHUNK_SIZE, num_mics)
-            if data.ndim == 2 and data.shape[1] == len(config.MIC_CHANNELS):
-                 processed = audio_state["beamformer"].apply(data)
-            else:
-                 # Fallback: Just take the first channel if shape doesn't match
-                 # flatten or slice
-                 # print("Channel mismatch or single channel input", file=sys.stderr)
-                 processed = data[:, 0] if data.ndim == 2 else data
+            processed = audio_state["beamformer"].apply(data) # Apply handles dimension checks/padding
         else:
              processed = data[:, 0] if data.ndim == 2 else data
         
@@ -145,8 +138,6 @@ def audio_callback(outdata, frames, time, status):
 def daq_thread_func(stop_event):
     """Producer thread that reads from DAQ."""
     print("DAQ Thread Started")
-    from nidaqmx.constants import AcquisitionType
-    
     try:
         with nidaqmx.Task() as task:
             # Add all configured channels
@@ -159,7 +150,7 @@ def daq_thread_func(stop_event):
 
             task.timing.cfg_samp_clk_timing(SAMPLE_RATE, samps_per_chan=CHUNK_SIZE * 10, sample_mode=AcquisitionType.CONTINUOUS)
             
-            # Explicitly start (optional, but good practice)
+            # Explicitly start
             try:
                 task.start()
             except Exception as e:
@@ -170,12 +161,11 @@ def daq_thread_func(stop_event):
             
             while not stop_event.is_set():
                 try:
-                    # Check available samples
                     avail = task.in_stream.avail_samp_per_chan
                     if avail < CHUNK_SIZE:
                         time.sleep(0.001)
                         continue
-                        
+
                     # Read multi-channel data
                     data = task.read(number_of_samples_per_channel=CHUNK_SIZE, timeout=10.0)
                     
@@ -188,13 +178,9 @@ def daq_thread_func(stop_event):
                         pass
                 except Exception as e:
                     print(f"DAQ Read Error: {e}")
-                    # If read fails (e.g. device disconnected), wait a bit and retry or break?
-                    # Breaking stops the stream. Let's break.
                     break
     except Exception as e:
         print(f"DAQ Initialization Error (Task creation): {e}")
-        # Could be missing drivers or device not found
-        # Simulate data for testing if requested? For now just exit thread.
     
     print("DAQ Thread Stopped")
 
@@ -202,14 +188,14 @@ class AudioApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Real-time Audio Equalizer")
-        self.root.geometry("600x950") # Further Increased height
+        self.root.geometry("600x950")
         
         # --- Dark Mode Colors ---
         self.bg_color = "#2b2b2b"
         self.fg_color = "#ffffff"
         self.accent_color = "#007acc"
         self.panel_bg = "#3c3f41"
-        self.plot_input_color = "#00bfa5" # Teal for input
+        self.plot_input_colors = ["#00bfa5", "#ffab00", "#d50000", "#6200ea"] # Colors for Ch0, Ch1...
         
         self.root.configure(bg=self.bg_color)
         
@@ -264,7 +250,7 @@ class AudioApp:
 
         # Subplot 2: Waveform (Input vs Output)
         self.ax_wave = self.fig.add_subplot(212)
-        self.ax_wave.set_title("Waveform (Input Ch0 vs Output)", color=self.fg_color)
+        self.ax_wave.set_title("Waveform (Input vs Output)", color=self.fg_color)
         self.ax_wave.set_ylabel("Amplitude", color=self.fg_color)
         self.ax_wave.set_xlabel("Time (s)", color=self.fg_color)
         self.ax_wave.set_facecolor(self.bg_color)
@@ -277,10 +263,17 @@ class AudioApp:
         # Time axis
         self.time_axis = np.linspace(0, CHUNK_SIZE/SAMPLE_RATE, CHUNK_SIZE)
         
-        self.line_wave_in, = self.ax_wave.plot([], [], lw=1, color=self.plot_input_color, alpha=0.6, label="Input (Ch0)")
+        # Prepare lines for Inputs
+        self.line_waves_in = []
+        for i, ch in enumerate(config.MIC_CHANNELS):
+            color = self.plot_input_colors[i % len(self.plot_input_colors)]
+            line, = self.ax_wave.plot([], [], lw=1, color=color, alpha=0.6, label=f"In {i}")
+            self.line_waves_in.append(line)
+
+        # Prepare line for Output
         self.line_wave_out, = self.ax_wave.plot([], [], lw=1, color=self.accent_color, label="Output")
-        self.ax_wave.legend(loc='upper right', frameon=False, labelcolor=self.fg_color)
         
+        self.ax_wave.legend(loc='upper right', frameon=False, labelcolor=self.fg_color)
         self.fig.tight_layout()
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
@@ -300,7 +293,7 @@ class AudioApp:
             lambda e: self.canvas_scroll.configure(scrollregion=self.canvas_scroll.bbox("all"))
         )
         
-        self.canvas_scroll.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=560) # Fixed width adjustment
+        self.canvas_scroll.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=560) 
         
         self.canvas_scroll.configure(yscrollcommand=scrollbar.set)
         
@@ -331,8 +324,7 @@ class AudioApp:
             gain_var = tk.DoubleVar(value=audio_state["input_gains"][i])
             ttk.Scale(ch_frame, from_=0.0, to=5.0, variable=gain_var, command=make_gain_callback(i)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
             
-            # Level Meter (ProgressBar)
-            # max value ~ 0.5 (RMS of sin wave amp 0.7 is 0.5? No 0.7*0.707 = 0.5. Max amp is 1.0. RMS square wave 1.0. Sin wave 0.707)
+            # Level Meter
             bar = ttk.Progressbar(ch_frame, orient=tk.HORIZONTAL, length=100, mode='determinate', maximum=0.5) 
             bar.pack(side=tk.RIGHT)
             self.input_bars.append(bar)
@@ -386,7 +378,6 @@ class AudioApp:
         spacing_frame.pack(fill=tk.X, pady=5, padx=5)
         
         # Default from config (calculate from positions if possible, or just default)
-        # Assuming 2 mics symmetric: spacing is dist between them = 0.76
         initial_spacing = 0.76
         self.spacing_val = tk.DoubleVar(value=initial_spacing)
         
@@ -602,10 +593,10 @@ class AudioApp:
             
             # Input
             if chunk_in is not None and chunk_in.ndim == 2:
-                 # Just Ch0
-                 self.line_wave_in.set_data(self.time_axis, chunk_in[:, 0])
-            elif chunk_in is not None:
-                 self.line_wave_in.set_data(self.time_axis, chunk_in)
+                 # Update all input lines
+                 for i, line in enumerate(self.line_waves_in):
+                     if i < chunk_in.shape[1]:
+                         line.set_data(self.time_axis, chunk_in[:, i])
             
             self.canvas.draw_idle()
         
