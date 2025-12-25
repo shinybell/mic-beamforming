@@ -24,6 +24,7 @@ QUEUE_SIZE = 20
 # Global State for Audio Processing
 audio_state = {
     "gain": 1.2,
+    "input_gains": [1.0] * len(config.MIC_CHANNELS), # Input calibration gains
     "target_angle": 0.0, # Degrees
     "beamformer": None,  # Instance
     "high_pass_cutoff": 80,
@@ -36,7 +37,8 @@ audio_state = {
     "band_stop_filters": [],
     
     "latest_chunk": None,  # For visualization (Output)
-    "latest_input_chunk": None # For visualization (Input)
+    "latest_input_chunk": None, # For visualization (Input)
+    "input_levels": [0.0] * len(config.MIC_CHANNELS) # RMS levels for UI
 }
 
 # Queue
@@ -80,14 +82,25 @@ def audio_callback(outdata, frames, time, status):
         
         # --- Processing ---
         
-        # 0. Beamforming (Multi-channel -> Single-channel)
+        # Apply Input Gains first
+        if data.ndim == 2:
+            # Broadcast multiply: (samples, channels) * (channels,)
+            gains = np.array(audio_state["input_gains"])
+            if len(gains) == data.shape[1]:
+                data = data * gains
         
+        # Calculate Input Levels (RMS) for UI
+        if data.ndim == 2:
+            rms_levels = np.sqrt(np.mean(data**2, axis=0))
+            audio_state["input_levels"] = rms_levels.tolist()
+
         # Store raw input for visualization (first channel)
         if data.ndim == 2:
             audio_state["latest_input_chunk"] = data
         else:
             audio_state["latest_input_chunk"] = None
 
+        # 0. Beamforming (Multi-channel -> Single-channel)
         if audio_state["beamformer"] is not None:
             # Check if input data matches expected channel count
             # data shape should be (CHUNK_SIZE, num_mics)
@@ -161,7 +174,7 @@ class AudioApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Real-time Audio Equalizer")
-        self.root.geometry("600x900") # Increased height for extra plot
+        self.root.geometry("600x950") # Further Increased height
         
         # --- Dark Mode Colors ---
         self.bg_color = "#2b2b2b"
@@ -185,6 +198,7 @@ class AudioApp:
         style.map("TButton", background=[("active", self.accent_color)])
         style.configure("Horizontal.TScale", background=self.bg_color, troughcolor=self.panel_bg, sliderthickness=15)
         style.configure("TRadiobutton", background=self.bg_color, foreground=self.fg_color, indicatorbackground=self.bg_color, selectcolor=self.panel_bg)
+        style.configure("TProgressbar", thickness=15, background=self.accent_color, troughcolor=self.panel_bg)
         
         # Custom style for scrollable frame
         style.configure("Panel.TFrame", background=self.panel_bg)
@@ -267,6 +281,34 @@ class AudioApp:
 
         # Content inside Scrollable Frame
         
+        # --- Input Calibration Control ---
+        cal_frame = ttk.LabelFrame(self.scrollable_frame, text="Input Calibration (Gain & Monitor)", padding="10")
+        cal_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        self.input_bars = []
+        
+        for i in range(len(config.MIC_CHANNELS)):
+            ch_frame = ttk.Frame(cal_frame)
+            ch_frame.pack(fill=tk.X, pady=2)
+            
+            # Label
+            ttk.Label(ch_frame, text=f"Ch {i}").pack(side=tk.LEFT, width=5)
+            
+            # Gain Slider
+            def make_gain_callback(index):
+                def cb(val):
+                    audio_state["input_gains"][index] = float(val)
+                return cb
+            
+            gain_var = tk.DoubleVar(value=audio_state["input_gains"][i])
+            ttk.Scale(ch_frame, from_=0.0, to=5.0, variable=gain_var, command=make_gain_callback(i)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            
+            # Level Meter (ProgressBar)
+            # max value ~ 0.5 (RMS of sin wave amp 0.7 is 0.5? No 0.7*0.707 = 0.5. Max amp is 1.0. RMS square wave 1.0. Sin wave 0.707)
+            bar = ttk.Progressbar(ch_frame, orient=tk.HORIZONTAL, length=100, mode='determinate', maximum=0.5) 
+            bar.pack(side=tk.RIGHT)
+            self.input_bars.append(bar)
+
         # --- Beamforming Control ---
         bf_frame = ttk.LabelFrame(self.scrollable_frame, text="Beamforming", padding="10")
         bf_frame.pack(fill=tk.X, pady=5, padx=5)
@@ -288,12 +330,6 @@ class AudioApp:
             
             # Restore state
             audio_state["beamformer"].update_steering_vector(current_angle)
-            # Update spacing if needed.
-            # Assuming standard geometry for now as we don't have easy access to self.spacing_val inside this closure 
-            # if we define it before the variable.
-            # BUT: self.spacing_val is defined BELOW in the original code order. 
-            # I must move spacing_val definition UP or change how I access it.
-            # Let's fix this in the code below by defining spacing_val before controls.
             if hasattr(self, 'spacing_val'):
                  audio_state["beamformer"].update_geometry(self.spacing_val.get())
 
@@ -498,6 +534,12 @@ class AudioApp:
         chunk = audio_state["latest_chunk"]
         chunk_in = audio_state["latest_input_chunk"] # Raw input
         
+        # Update Input Level Meters
+        levels = audio_state["input_levels"]
+        if len(levels) == len(self.input_bars):
+            for i, level in enumerate(levels):
+                self.input_bars[i]['value'] = level
+
         if chunk is not None:
             # 1. Update Spectrum
             N = len(chunk)
