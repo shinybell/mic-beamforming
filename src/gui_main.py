@@ -14,7 +14,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 import config as config
-from beamformer import FreqDomainBeamformer
+from beamformer import DelayAndSumBeamformer, MVDRBeamformer
 
 # Configuration (Driven by config.py now)
 SAMPLE_RATE = config.SAMPLE_RATE
@@ -35,7 +35,8 @@ audio_state = {
     # Each item: {"enabled": bool, "low": float, "high": float, "b": array, "a": array, "id": int}
     "band_stop_filters": [],
     
-    "latest_chunk": None  # For visualization
+    "latest_chunk": None,  # For visualization (Output)
+    "latest_input_chunk": None # For visualization (Input)
 }
 
 # Queue
@@ -80,6 +81,13 @@ def audio_callback(outdata, frames, time, status):
         # --- Processing ---
         
         # 0. Beamforming (Multi-channel -> Single-channel)
+        
+        # Store raw input for visualization (first channel)
+        if data.ndim == 2:
+            audio_state["latest_input_chunk"] = data
+        else:
+            audio_state["latest_input_chunk"] = None
+
         if audio_state["beamformer"] is not None:
             # Check if input data matches expected channel count
             # data shape should be (CHUNK_SIZE, num_mics)
@@ -153,13 +161,14 @@ class AudioApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Real-time Audio Equalizer")
-        self.root.geometry("600x800")
+        self.root.geometry("600x900") # Increased height for extra plot
         
         # --- Dark Mode Colors ---
         self.bg_color = "#2b2b2b"
         self.fg_color = "#ffffff"
         self.accent_color = "#007acc"
         self.panel_bg = "#3c3f41"
+        self.plot_input_color = "#00bfa5" # Teal for input
         
         self.root.configure(bg=self.bg_color)
         
@@ -175,6 +184,7 @@ class AudioApp:
         style.configure("TButton", background=self.panel_bg, foreground=self.fg_color, borderwidth=1)
         style.map("TButton", background=[("active", self.accent_color)])
         style.configure("Horizontal.TScale", background=self.bg_color, troughcolor=self.panel_bg, sliderthickness=15)
+        style.configure("TRadiobutton", background=self.bg_color, foreground=self.fg_color, indicatorbackground=self.bg_color, selectcolor=self.panel_bg)
         
         # Custom style for scrollable frame
         style.configure("Panel.TFrame", background=self.panel_bg)
@@ -182,8 +192,8 @@ class AudioApp:
         # Initialize filter ID counter
         self.filter_id_counter = 0
 
-        # Initialize Beamformer
-        audio_state["beamformer"] = FreqDomainBeamformer()
+        # Initialize Beamformer (Default: DelayAndSum)
+        audio_state["beamformer"] = DelayAndSumBeamformer()
         update_filters()
 
         # --- GUI Layout ---
@@ -191,25 +201,45 @@ class AudioApp:
         main_container = ttk.Frame(root, padding="10")
         main_container.pack(fill=tk.BOTH, expand=True)
         
-        # 1. Spectrum Plot (Dark Mode)
+        # 1. Plots (Updated to have 2 subplots)
         plot_frame = ttk.Frame(main_container)
         plot_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
         
-        self.fig = Figure(figsize=(5, 3), dpi=100, facecolor=self.bg_color)
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_title("Frequency Spectrum", color=self.fg_color)
-        self.ax.set_xlabel("Frequency (Hz)", color=self.fg_color)
-        self.ax.set_ylabel("Magnitude (dB)", color=self.fg_color)
-        self.ax.set_facecolor(self.bg_color)
-        self.ax.tick_params(colors=self.fg_color)
-        for spine in self.ax.spines.values():
-            spine.set_edgecolor(self.panel_bg)
-            
-        self.ax.set_xlim(0, SAMPLE_RATE / 2)
-        self.ax.set_ylim(-60, 40)
-        self.ax.grid(True, color=self.panel_bg, linestyle='--', alpha=0.5)
+        self.fig = Figure(figsize=(5, 5), dpi=100, facecolor=self.bg_color)
         
-        self.line, = self.ax.plot([], [], lw=1, color=self.accent_color)
+        # Subplot 1: Frequency Spectrum (Output)
+        self.ax_spec = self.fig.add_subplot(211)
+        self.ax_spec.set_title("Output Frequency Spectrum", color=self.fg_color)
+        self.ax_spec.set_ylabel("dB", color=self.fg_color)
+        self.ax_spec.set_facecolor(self.bg_color)
+        self.ax_spec.tick_params(colors=self.fg_color)
+        for spine in self.ax_spec.spines.values():
+            spine.set_edgecolor(self.panel_bg)
+        self.ax_spec.set_xlim(0, SAMPLE_RATE / 2)
+        self.ax_spec.set_ylim(-60, 40)
+        self.ax_spec.grid(True, color=self.panel_bg, linestyle='--', alpha=0.5)
+        self.line_spec, = self.ax_spec.plot([], [], lw=1, color=self.accent_color)
+
+        # Subplot 2: Waveform (Input vs Output)
+        self.ax_wave = self.fig.add_subplot(212)
+        self.ax_wave.set_title("Waveform (Input Ch0 vs Output)", color=self.fg_color)
+        self.ax_wave.set_ylabel("Amplitude", color=self.fg_color)
+        self.ax_wave.set_xlabel("Time (s)", color=self.fg_color)
+        self.ax_wave.set_facecolor(self.bg_color)
+        self.ax_wave.tick_params(colors=self.fg_color)
+        for spine in self.ax_wave.spines.values():
+            spine.set_edgecolor(self.panel_bg)
+        self.ax_wave.set_ylim(-1.1, 1.1)
+        self.ax_wave.grid(True, color=self.panel_bg, linestyle='--', alpha=0.5)
+        
+        # Time axis
+        self.time_axis = np.linspace(0, CHUNK_SIZE/SAMPLE_RATE, CHUNK_SIZE)
+        
+        self.line_wave_in, = self.ax_wave.plot([], [], lw=1, color=self.plot_input_color, alpha=0.6, label="Input (Ch0)")
+        self.line_wave_out, = self.ax_wave.plot([], [], lw=1, color=self.accent_color, label="Output")
+        self.ax_wave.legend(loc='upper right', frameon=False, labelcolor=self.fg_color)
+        
+        self.fig.tight_layout()
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.draw()
@@ -238,18 +268,48 @@ class AudioApp:
         # Content inside Scrollable Frame
         
         # --- Beamforming Control ---
-        bf_frame = ttk.LabelFrame(self.scrollable_frame, text="Beamforming Direction", padding="10")
+        bf_frame = ttk.LabelFrame(self.scrollable_frame, text="Beamforming", padding="10")
         bf_frame.pack(fill=tk.X, pady=5, padx=5)
         
+        # Algorithm Selection
+        algo_frame = ttk.Frame(bf_frame)
+        algo_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(algo_frame, text="Algorithm: ").pack(side=tk.LEFT)
+        self.bf_algo_var = tk.StringVar(value="DelayAndSum")
+        
+        def on_algo_change():
+            algo = self.bf_algo_var.get()
+            current_angle = audio_state["target_angle"]
+            current_spacing = 0.76 # default, ideally track this
+            if algo == "DelayAndSum":
+                audio_state["beamformer"] = DelayAndSumBeamformer()
+            else:
+                audio_state["beamformer"] = MVDRBeamformer()
+            
+            # Restore state
+            audio_state["beamformer"].update_steering_vector(current_angle)
+            # Update spacing if needed.
+            # Assuming standard geometry for now as we don't have easy access to self.spacing_val inside this closure 
+            # if we define it before the variable.
+            # BUT: self.spacing_val is defined BELOW in the original code order. 
+            # I must move spacing_val definition UP or change how I access it.
+            # Let's fix this in the code below by defining spacing_val before controls.
+            if hasattr(self, 'spacing_val'):
+                 audio_state["beamformer"].update_geometry(self.spacing_val.get())
+
+        ttk.Radiobutton(algo_frame, text="Delay & Sum", variable=self.bf_algo_var, value="DelayAndSum", command=on_algo_change).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(algo_frame, text="MVDR", variable=self.bf_algo_var, value="MVDR", command=on_algo_change).pack(side=tk.LEFT, padx=5)
+
+        # Angle Control
         self.angle_val = tk.DoubleVar(value=audio_state["target_angle"])
         
         # Angle Label with callback
-        self.angle_label = ttk.Label(bf_frame, text=f"{int(self.angle_val.get())}°")
-        self.angle_label.pack(anchor=tk.E)
+        self.angle_label = ttk.Label(bf_frame, text=f"Angle: {int(self.angle_val.get())}°")
+        self.angle_label.pack(anchor=tk.W)
         
         def on_angle_change(val):
             angle = float(val)
-            self.angle_label.config(text=f"{int(angle)}°")
+            self.angle_label.config(text=f"Angle: {int(angle)}°")
             audio_state["target_angle"] = angle
             # Only update if beamformer exists
             if audio_state["beamformer"]:
@@ -436,8 +496,10 @@ class AudioApp:
     def update_plot(self):
         """Fetch latest audio data and update the plot."""
         chunk = audio_state["latest_chunk"]
+        chunk_in = audio_state["latest_input_chunk"] # Raw input
+        
         if chunk is not None:
-            # Calculate FFT
+            # 1. Update Spectrum
             N = len(chunk)
             yf = np.fft.fft(chunk)
             xf = np.fft.fftfreq(N, 1 / SAMPLE_RATE)
@@ -449,13 +511,19 @@ class AudioApp:
             # Use log scale (dB) with safe log
             magnitude_db = 20 * np.log10(np.maximum(magnitude, 1e-6))
             
-            self.line.set_data(xf, magnitude_db)
+            self.line_spec.set_data(xf, magnitude_db)
+            
+            # 2. Update Waveform
+            # Output
+            self.line_wave_out.set_data(self.time_axis, chunk)
+            
+            # Input
+            if chunk_in is not None and chunk_in.ndim == 2:
+                 # Just Ch0
+                 self.line_wave_in.set_data(self.time_axis, chunk_in[:, 0])
+            elif chunk_in is not None:
+                 self.line_wave_in.set_data(self.time_axis, chunk_in)
+            
             self.canvas.draw_idle()
         
         self.root.after(50, self.update_plot)
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = AudioApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.stop_audio)
-    root.mainloop()
