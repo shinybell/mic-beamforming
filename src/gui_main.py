@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
+import time
 
 import config as config
 from beamformer import DelayAndSumBeamformer, MVDRBeamformer
@@ -109,7 +109,7 @@ def audio_callback(outdata, frames, time, status):
             else:
                  # Fallback: Just take the first channel if shape doesn't match
                  # flatten or slice
-                 print("Channel mismatch or single channel input", file=sys.stderr)
+                 # print("Channel mismatch or single channel input", file=sys.stderr)
                  processed = data[:, 0] if data.ndim == 2 else data
         else:
              processed = data[:, 0] if data.ndim == 2 else data
@@ -145,29 +145,49 @@ def audio_callback(outdata, frames, time, status):
 def daq_thread_func(stop_event):
     """Producer thread that reads from DAQ."""
     print("DAQ Thread Started")
-    with nidaqmx.Task() as task:
-        # Add all configured channels
-        for channel in config.MIC_CHANNELS:
-            task.ai_channels.add_ai_voltage_chan(channel)
-            
-        task.timing.cfg_samp_clk_timing(SAMPLE_RATE, samps_per_chan=CHUNK_SIZE * 10)
-        
-        while not stop_event.is_set():
-            try:
-                # Read multi-channel data
-                # Returns list of lists (num_channels, num_samples) or single list
-                data = task.read(number_of_samples_per_channel=CHUNK_SIZE)
-                
-                # Convert to numpy array (float32) and Transpose to (samples, channels)
-                np_data = np.array(data, dtype=np.float32).T
-                
+    try:
+        with nidaqmx.Task() as task:
+            # Add all configured channels
+            for channel in config.MIC_CHANNELS:
                 try:
-                    audio_queue.put(np_data, block=True, timeout=1)
-                except queue.Full:
-                    pass
+                    task.ai_channels.add_ai_voltage_chan(channel)
+                except Exception as e:
+                     print(f"DAQ Setup Error (Channel {channel}): {e}")
+                     return # Exit thread if setup fails
+
+            task.timing.cfg_samp_clk_timing(SAMPLE_RATE, samps_per_chan=CHUNK_SIZE * 10)
+            
+            # Explicitly start (optional, but good practice)
+            try:
+                task.start()
             except Exception as e:
-                print(f"DAQ Error: {e}")
-                break
+                print(f"DAQ Start Error: {e}")
+                return
+
+            print("DAQ Task Running")
+            
+            while not stop_event.is_set():
+                try:
+                    # Read multi-channel data
+                    data = task.read(number_of_samples_per_channel=CHUNK_SIZE, timeout=10.0)
+                    
+                    # Convert to numpy array (float32) and Transpose to (samples, channels)
+                    np_data = np.array(data, dtype=np.float32).T
+                    
+                    try:
+                        audio_queue.put(np_data, block=True, timeout=1)
+                    except queue.Full:
+                        pass
+                except Exception as e:
+                    print(f"DAQ Read Error: {e}")
+                    # If read fails (e.g. device disconnected), wait a bit and retry or break?
+                    # Breaking stops the stream. Let's break.
+                    break
+    except Exception as e:
+        print(f"DAQ Initialization Error (Task creation): {e}")
+        # Could be missing drivers or device not found
+        # Simulate data for testing if requested? For now just exit thread.
+    
     print("DAQ Thread Stopped")
 
 class AudioApp:
@@ -517,14 +537,24 @@ class AudioApp:
         self.stop_event = threading.Event()
         self.daq_thread = threading.Thread(target=daq_thread_func, args=(self.stop_event,), daemon=True)
         self.daq_thread.start()
-        self.stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, blocksize=CHUNK_SIZE, callback=audio_callback)
-        self.stream.start()
-        self.status_label.config(text="Audio Running")
+        
+        try:
+            self.stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, blocksize=CHUNK_SIZE, callback=audio_callback)
+            self.stream.start()
+            self.status_label.config(text="Audio Running")
+        except Exception as e:
+            print(f"Audio Output Error: {e}")
+            self.status_label.config(text="Audio Output Failed (Check Console)")
+            # Do NOT exit, allow GUI to run for inspection
 
     def stop_audio(self):
         self.stop_event.set()
-        self.stream.stop()
-        self.stream.close()
+        if hasattr(self, 'stream'):
+             try:
+                self.stream.stop()
+                self.stream.close()
+             except:
+                 pass
         self.root.quit()
         # Force exit to kill threads immediately if they hang
         sys.exit(0)
@@ -538,7 +568,10 @@ class AudioApp:
         levels = audio_state["input_levels"]
         if len(levels) == len(self.input_bars):
             for i, level in enumerate(levels):
-                self.input_bars[i]['value'] = level
+                try:
+                     self.input_bars[i]['value'] = level
+                except:
+                     pass
 
         if chunk is not None:
             # 1. Update Spectrum
@@ -569,3 +602,9 @@ class AudioApp:
             self.canvas.draw_idle()
         
         self.root.after(50, self.update_plot)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AudioApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.stop_audio)
+    root.mainloop()
