@@ -158,44 +158,44 @@ class NIDAQBeamformer:
     
     def update_steering_vector(self, theta_deg):
         """
-        指定角度に対するステアリングベクトルを更新
+        振幅ベースのビームフォーミングパラメータを更新
         
         Parameters:
         -----------
         theta_deg : float
             目的角度（度）
-            0度 = 正面（マイクアレイに垂直）
-            90度 = 右側（エンドファイア）
-            -90度 = 左側
+            -90度 = 左側（左マイク優先）
+            0度 = 正面（両マイク均等）
+            90度 = 右側（右マイク優先）
         """
         self.current_angle = theta_deg
-        theta_rad = np.deg2rad(theta_deg)
         
-        # 方向ベクトル（音源方向）
-        # 0度 = 正面（Y軸正方向）、90度 = 右（X軸正方向）
-        ux = np.sin(theta_rad)
-        uy = np.cos(theta_rad)
-        uz = 0.0
+        # 振幅ベースの重み付けを計算
+        # -90度 → 左マイク100%, 右マイク0%
+        # 0度   → 左マイク50%,  右マイク50%
+        # 90度  → 左マイク0%,   右マイク100%
         
-        # 各マイクの時間遅延を計算
-        # マイクが音源に近いほど、信号が早く到達する
-        delays = np.dot(self.mic_positions, np.array([ux, uy, uz])) / config.SPEED_OF_SOUND
+        # 角度を-90〜90の範囲に正規化
+        normalized_angle = np.clip(theta_deg, -90, 90) / 90.0  # -1.0 〜 1.0
         
-        # 各周波数に対する位相シフトを計算
-        omega = 2 * np.pi * self.freqs
+        # 左右の重み（振幅ベース）
+        # normalized_angle = -1.0 → left_weight = 1.0, right_weight = 0.0
+        # normalized_angle =  0.0 → left_weight = 0.5, right_weight = 0.5
+        # normalized_angle =  1.0 → left_weight = 0.0, right_weight = 1.0
+        self.left_weight = (1.0 - normalized_angle) / 2.0
+        self.right_weight = (1.0 + normalized_angle) / 2.0
         
-        # ステアリングベクトル = exp(j * omega * tau)
-        # 信号を位相整列させるための補償
-        self.steering_vector = np.exp(1j * np.outer(omega, delays))
+        # 反対側の抑制係数（より強い分離のため）
+        self.suppression_factor = 0.3  # 反対側を30%に減衰
         
-        # 正規化（Delay-and-Sum）
-        self.steering_vector /= self.num_mics
-        
-        print(f"\nステアリングベクトル更新: {theta_deg}度")
+        print(f"\n振幅ベースビームフォーミング設定: {theta_deg}度")
+        print(f"  左マイク重み: {self.left_weight:.2f}")
+        print(f"  右マイク重み: {self.right_weight:.2f}")
+        print(f"  抑制係数: {self.suppression_factor:.2f}")
     
     def apply_beamforming(self, multichannel_chunk):
         """
-        ビームフォーミングを適用
+        振幅ベースのビームフォーミングを適用
         
         Parameters:
         -----------
@@ -209,18 +209,25 @@ class NIDAQBeamformer:
             ビームフォーミング後の音声
             shape: (chunk_size,)
         """
-        # 1. FFT（周波数領域に変換）
-        spectrum = np.fft.rfft(multichannel_chunk, axis=0)
+        # 左右チャンネルを分離
+        left_channel = multichannel_chunk[:, 0]
+        right_channel = multichannel_chunk[:, 1]
         
-        # 2. ステアリングベクトルを適用
-        # spectrum: (num_bins, num_mics)
-        # steering_vector: (num_bins, num_mics)
-        beamformed_spectrum = np.sum(spectrum * self.steering_vector, axis=1)
+        # 振幅ベースの重み付け
+        if self.current_angle < 0:
+            # 左側を強調（-90度に近い）
+            # 左チャンネルをそのまま、右チャンネルを抑制
+            output = left_channel - self.suppression_factor * right_channel
+        elif self.current_angle > 0:
+            # 右側を強調（90度に近い）
+            # 右チャンネルをそのまま、左チャンネルを抑制
+            output = right_channel - self.suppression_factor * left_channel
+        else:
+            # 正面（0度）
+            # 両チャンネルを均等に混合
+            output = (left_channel + right_channel) / 2.0
         
-        # 3. IFFT（時間領域に戻す）
-        beamformed_chunk = np.fft.irfft(beamformed_spectrum, n=self.chunk_size)
-        
-        return beamformed_chunk.astype(np.float32)
+        return output.astype(np.float32)
     
     def enhance_audio_quality(self, audio_data):
         """
