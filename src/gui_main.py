@@ -312,7 +312,7 @@ class AudioApp:
             ch_frame.pack(fill=tk.X, pady=2)
             
             # Label
-            ttk.Label(ch_frame, text=f"Ch {i}").pack(side=tk.LEFT, width=5)
+            ttk.Label(ch_frame, text=f"Ch {i}").pack(side=tk.LEFT, padx=5)
             
             # Gain Slider
             def make_gain_callback(index):
