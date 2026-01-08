@@ -183,8 +183,8 @@ def main():
     print()
 
     # 設定
-    device_name = "Dev10"  # 必要に応じて変更
-    sample_rate = 44100  # サンプリングレート（Hz）
+    device_name = "Dev7"  # 必要に応じて変更
+    sample_rate = 10000  # サンプリングレート（Hz）
     record_time = None  # None: 手動停止まで、数値: 指定秒数
 
     # 録音時間を入力
