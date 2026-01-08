@@ -129,37 +129,50 @@ class NIDAQRecorder:
             print(f"\nエラー: {e}")
             sys.exit(1)
 
-    def save_wav(self, filename=None):
-        """録音データをWAVファイルに保存"""
+    def save_wav(self, filename_prefix=None):
+        """録音データを2つのモノラルWAVファイルに保存"""
         if len(self.recorded_data) == 0:
             print("録音データがありません")
             return
 
         # ファイル名が指定されていない場合、タイムスタンプを使用
-        if filename is None:
+        if filename_prefix is None:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"nidaq_recording_{timestamp}.wav"
-
-        # データを-1.0～1.0に正規化
-        max_val = np.abs(self.recorded_data).max()
-        if max_val > 0:
-            normalized_data = self.recorded_data / max_val
+            filename_prefix = f"nidaq_recording_{timestamp}"
         else:
-            normalized_data = self.recorded_data
-
-        # 16bitに変換
-        audio_data = (normalized_data * 32767).astype(np.int16)
-
-        # WAVファイルに保存
-        wavfile.write(filename, self.sample_rate, audio_data)
+            # .wavを削除
+            if filename_prefix.endswith(".wav"):
+                filename_prefix = filename_prefix[:-4]
 
         duration = len(self.recorded_data) / self.sample_rate
-        print(f"\n保存完了:")
-        print(f"  ファイル名: {filename}")
-        print(f"  サンプリングレート: {self.sample_rate} Hz")
-        print(f"  チャンネル数: {audio_data.shape[1]}")
-        print(f"  録音時間: {duration:.2f} 秒")
-        print(f"  サンプル数: {len(audio_data)}")
+
+        # 各チャンネルを個別に保存
+        for ch_idx in range(self.recorded_data.shape[1]):
+            # チャンネルデータを取得
+            channel_data = self.recorded_data[:, ch_idx]
+
+            # データを-1.0～1.0に正規化
+            max_val = np.abs(channel_data).max()
+            if max_val > 0:
+                normalized_data = channel_data / max_val
+            else:
+                normalized_data = channel_data
+
+            # 16bitに変換
+            audio_data = (normalized_data * 32767).astype(np.int16)
+
+            # ファイル名を作成（ch1, ch2）
+            filename = f"{filename_prefix}_ch{ch_idx + 1}.wav"
+
+            # WAVファイルに保存（モノラル）
+            wavfile.write(filename, self.sample_rate, audio_data)
+
+            print(f"\nチャンネル{ch_idx + 1} 保存完了:")
+            print(f"  ファイル名: {filename}")
+            print(f"  サンプリングレート: {self.sample_rate} Hz")
+            print(f"  チャンネル数: 1 (モノラル)")
+            print(f"  録音時間: {duration:.2f} 秒")
+            print(f"  サンプル数: {len(audio_data)}")
 
 
 def main():
@@ -183,12 +196,12 @@ def main():
             print("無効な入力です。手動停止モードで録音します。")
             record_time = None
 
-    # 出力ファイル名を入力
-    filename = input("出力ファイル名（Enter=自動生成）: ").strip()
+    # 出力ファイル名のプレフィックスを入力
+    filename = input(
+        "出力ファイル名のプレフィックス（Enter=自動生成、_ch1.wavと_ch2.wavが追加されます）: "
+    ).strip()
     if not filename:
         filename = None
-    elif not filename.endswith(".wav"):
-        filename += ".wav"
 
     print()
 
