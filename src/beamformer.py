@@ -1,6 +1,8 @@
 import numpy as np
 import config as config
 from abc import ABC, abstractmethod
+from scipy.io import wavfile
+import os
 
 class BeamformerBase(ABC):
     def __init__(self, mic_positions=config.MIC_POSITIONS, sample_rate=config.SAMPLE_RATE, chunk_size=config.CHUNK_SIZE):
@@ -107,7 +109,7 @@ class MVDRBeamformer(BeamformerBase):
         # Initialize with Identity (uncorrelated noise assumption)
         self.R = np.zeros((self.num_bins, self.num_mics, self.num_mics), dtype=np.complex64)
         for k in range(self.num_bins):
-            self.R[k] = np.eye(self.num_mics, dtype=np.complex64) * 1e-3 # Small init
+            self.R[k] = np.eye(self.num_mics, dtype=np.complex64) * 10.0 # Larger init to prevent instability
             
         # Steering vector a(f, theta) - pure delay vector, NOT weights
         self.steering_vector_a = np.ones((self.num_bins, self.num_mics), dtype=np.complex64)
@@ -170,13 +172,19 @@ class MVDRBeamformer(BeamformerBase):
         
         self.steering_vector_a = np.exp(-1j * np.outer(omega, delays))
 
-    def apply(self, multichannel_chunk):
+    def apply(self, multichannel_chunk, debug=False):
         # 1. FFT
         # spectrum shape: (num_bins, num_mics)
         # This is our 'x' vector for each frequency.
         spectrum = np.fft.rfft(multichannel_chunk, axis=0)
         
         num_bins, num_mics = spectrum.shape
+        
+        if debug:
+            print(f"  [MVDR Debug] Input chunk shape: {multichannel_chunk.shape}")
+            print(f"  [MVDR Debug] Input range: [{np.min(multichannel_chunk):.6f}, {np.max(multichannel_chunk):.6f}]")
+            print(f"  [MVDR Debug] Spectrum shape: {spectrum.shape}")
+            print(f"  [MVDR Debug] Spectrum magnitude range: [{np.min(np.abs(spectrum)):.6f}, {np.max(np.abs(spectrum)):.6f}]")
         
         # 2. Update Covariance Matrix R recursively
         # R[k] = alpha * R[k] + (1-alpha) * x[k] * x[k]^H
@@ -219,8 +227,15 @@ class MVDRBeamformer(BeamformerBase):
         # Avoid division by zero (unlikely)
         denom = np.maximum(np.real(denom), 1e-12) + 1j * np.imag(denom)
         
+        if debug:
+            print(f"  [MVDR Debug] Denominator range: [{np.min(np.abs(denom)):.6e}, {np.max(np.abs(denom)):.6e}]")
+            print(f"  [MVDR Debug] R matrix diagonal mean: {np.mean(np.abs(np.diagonal(self.R, axis1=1, axis2=2))):.6e}")
+        
         w_mvdr = num / denom # (B, M, 1)
         w_mvdr = w_mvdr.squeeze(axis=2) # (B, M)
+        
+        if debug:
+            print(f"  [MVDR Debug] w_mvdr magnitude range: [{np.min(np.abs(w_mvdr)):.6f}, {np.max(np.abs(w_mvdr)):.6f}]")
         
         # NOTE: w_mvdr is designed for y = w^H x.
         # Our apply uses sum(weight * x) = weight^T x.
@@ -230,8 +245,193 @@ class MVDRBeamformer(BeamformerBase):
         # 4. Apply
         beamformed_spectrum = np.sum(spectrum * weights_for_code, axis=1)
         
+        if debug:
+            print(f"  [MVDR Debug] Beamformed spectrum magnitude range: [{np.min(np.abs(beamformed_spectrum)):.6f}, {np.max(np.abs(beamformed_spectrum)):.6f}]")
+        
         # 5. IFFT
         beamformed_chunk = np.fft.irfft(beamformed_spectrum, n=self.chunk_size)
         
+        if debug:
+            print(f"  [MVDR Debug] Output range: [{np.min(beamformed_chunk):.6f}, {np.max(beamformed_chunk):.6f}]")
+        
         return beamformed_chunk.astype(np.float32)
 
+
+def load_stereo_wav(file_path_left, file_path_right):
+    """
+    Load two mono WAV files (left and right microphone recordings).
+
+    Args:
+        file_path_left: Path to left microphone WAV file
+        file_path_right: Path to right microphone WAV file
+
+    Returns:
+        multichannel_data: np.ndarray of shape (num_samples, 2), dtype=float32
+        sample_rate: int
+    """
+    # Read left channel
+    sr_left, data_left = wavfile.read(file_path_left)
+    # Read right channel
+    sr_right, data_right = wavfile.read(file_path_right)
+
+    if sr_left != sr_right:
+        raise ValueError(f"Sample rates don't match: {sr_left} vs {sr_right}")
+
+    # Normalize to [-1, 1] based on dtype
+    if data_left.dtype == np.int16:
+        data_left = data_left.astype(np.float32) / 32768.0
+        data_right = data_right.astype(np.float32) / 32768.0
+    elif data_left.dtype == np.int32:
+        data_left = data_left.astype(np.float32) / 2147483648.0
+        data_right = data_right.astype(np.float32) / 2147483648.0
+    else:
+        data_left = data_left.astype(np.float32)
+        data_right = data_right.astype(np.float32)
+
+    # Ensure same length
+    min_len = min(len(data_left), len(data_right))
+    data_left = data_left[:min_len]
+    data_right = data_right[:min_len]
+
+    # Stack into multichannel format
+    multichannel_data = np.stack([data_left, data_right], axis=1)
+
+    return multichannel_data, sr_left
+
+
+def save_wav(signal, file_path, sample_rate):
+    """
+    Save a time-domain signal to WAV file.
+
+    Args:
+        signal: np.ndarray, time-domain signal (float, normalized to [-1, 1])
+        file_path: Output file path
+        sample_rate: Sample rate
+    """
+    # Convert to int16
+    signal_int16 = (signal * 32767.0).astype(np.int16)
+    wavfile.write(file_path, sample_rate, signal_int16)
+    print(f"Saved: {file_path}")
+
+
+def process_wav_file(left_mic_path, right_mic_path, output_path,
+                    beamformer_type='delay_and_sum', angle_deg=0.0,
+                    mic_positions=config.MIC_POSITIONS, sample_rate=config.SAMPLE_RATE,
+                    chunk_size=config.CHUNK_SIZE):
+    """
+    Process WAV files with beamforming and save the result.
+
+    Args:
+        left_mic_path: Path to left microphone recording
+        right_mic_path: Path to right microphone recording
+        output_path: Path to save beamformed output
+        beamformer_type: 'delay_and_sum' or 'mvdr'
+        angle_deg: Beamforming angle in degrees (0 = front, positive = right)
+        mic_positions: Microphone positions array
+        sample_rate: Sample rate (should match WAV files)
+        chunk_size: Chunk size for processing
+    """
+    print(f"Loading WAV files...")
+    print(f"  Left:  {left_mic_path}")
+    print(f"  Right: {right_mic_path}")
+    
+    # Load WAV files
+    multichannel_data, file_sample_rate = load_stereo_wav(left_mic_path, right_mic_path)
+    
+    if file_sample_rate != sample_rate:
+        print(f"Warning: File sample rate ({file_sample_rate} Hz) differs from config ({sample_rate} Hz)")
+        print(f"Using file sample rate: {file_sample_rate} Hz")
+        sample_rate = file_sample_rate
+    
+    num_samples = multichannel_data.shape[0]
+    duration_sec = num_samples / sample_rate
+    print(f"Loaded {num_samples} samples ({duration_sec:.2f} seconds) at {sample_rate} Hz")
+    
+    # Create beamformer
+    if beamformer_type == 'mvdr':
+        beamformer = MVDRBeamformer(mic_positions=mic_positions, 
+                                   sample_rate=sample_rate, 
+                                   chunk_size=chunk_size)
+    else:
+        beamformer = DelayAndSumBeamformer(mic_positions=mic_positions, 
+                                          sample_rate=sample_rate, 
+                                          chunk_size=chunk_size)
+    
+    # Set beamforming angle
+    beamformer.update_steering_vector(angle_deg)
+    print(f"Beamformer: {beamformer_type}, Angle: {angle_deg}°")
+    
+    # Process audio in chunks (like gui_main, no overlap-add, no windowing)
+    output_chunks = []
+    num_chunks = 0
+    max_output = 0.0
+    min_output = 0.0
+    
+    for start in range(0, num_samples, chunk_size):
+        end = min(start + chunk_size, num_samples)
+        chunk_len = end - start
+        
+        # Get chunk
+        if chunk_len == chunk_size:
+            chunk = multichannel_data[start:end, :]
+        else:
+            # Pad last chunk with zeros to chunk_size
+            chunk = np.zeros((chunk_size, 2), dtype=np.float32)
+            chunk[:chunk_len, :] = multichannel_data[start:end, :]
+        
+        # Apply beamforming (same as gui_main)
+        # Enable debug for first few chunks
+        debug_flag = (num_chunks < 3) and (beamformer_type == 'mvdr')
+        if debug_flag:
+            print(f"\n--- Chunk {num_chunks} Debug ---")
+        
+        if beamformer_type == 'mvdr':
+            beamformed_chunk = beamformer.apply(chunk, debug=debug_flag)
+        else:
+            beamformed_chunk = beamformer.apply(chunk)
+        
+        # Track output range
+        max_output = max(max_output, np.max(beamformed_chunk))
+        min_output = min(min_output, np.min(beamformed_chunk))
+        
+        # Only keep the valid portion (remove padding from last chunk)
+        if chunk_len < chunk_size:
+            beamformed_chunk = beamformed_chunk[:chunk_len]
+        
+        output_chunks.append(beamformed_chunk)
+        
+        num_chunks += 1
+        if num_chunks % 100 == 0:
+            progress = (start / num_samples) * 100
+            print(f"  Processing: {progress:.1f}%, Output range so far: [{min_output:.3f}, {max_output:.3f}]")
+    
+    print(f"Processed {num_chunks} chunks")
+    print(f"Overall output range: [{min_output:.6f}, {max_output:.6f}]")
+    
+    # Concatenate all chunks
+    output_signal = np.concatenate(output_chunks)
+    
+    # Check for NaN or Inf
+    if np.any(np.isnan(output_signal)):
+        print(f"WARNING: Output contains NaN values!")
+    if np.any(np.isinf(output_signal)):
+        print(f"WARNING: Output contains Inf values!")
+    
+    # Normalize output to prevent clipping
+    max_val = np.max(np.abs(output_signal))
+    print(f"Output peak amplitude: {max_val:.6f}")
+    if max_val > 1.0:
+        print(f"Normalizing output (peak: {max_val:.2f})")
+        output_signal = output_signal / max_val
+    elif max_val < 0.001:
+        print(f"WARNING: Output is very quiet (peak: {max_val:.6f})")
+    
+    # Create output directory if needed
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created directory: {output_dir}")
+    
+    # Save output
+    save_wav(output_signal, output_path, sample_rate)
+    print(f"Beamforming complete!")

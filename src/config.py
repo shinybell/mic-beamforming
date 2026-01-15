@@ -8,10 +8,7 @@ CHUNK_SIZE = 2048
 
 # Microphone Channels (DAQ)
 # Ensure these match your actual hardware connection
-MIC_CHANNELS = [
-    "Dev7/ai0",
-    "Dev7/ai1"
-]
+MIC_CHANNELS = ["Dev7/ai0", "Dev7/ai1"]
 
 # Speed of Sound (m/s)
 SPEED_OF_SOUND = 343.0
@@ -21,7 +18,8 @@ SPEED_OF_SOUND = 343.0
 # Center is at (0, 0, 0)
 # Mic 0: -38cm (-0.38m)
 # Mic 1: +38cm (+0.38m)
-MIC_POSITIONS = np.array([
-    [-0.38, 0.0, 0.0],
-    [ 0.38, 0.0, 0.0]
-])
+MIC_POSITIONS = np.array([[-0.25, 0.0, 0.0], [0.25, 0.0, 0.0]])
+
+# WAV File Processing Settings
+DEFAULT_WAV_OUTPUT_DIR = "./beamformed_output"
+DEFAULT_BEAMFORMING_ANGLE = 0.0  # degrees
