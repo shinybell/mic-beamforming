@@ -6,8 +6,8 @@
 set -e  # Exit on error
 
 # Input files
-LEFT_MIC="momotaro_ch1.wav"
-RIGHT_MIC="momotaro_ch2.wav"
+LEFT_MIC="ada_ch1.wav"
+RIGHT_MIC="ada_ch2.wav"
 
 # Check if input files exist
 if [ ! -f "$LEFT_MIC" ]; then
