@@ -84,7 +84,7 @@ class AmplitudeRatioSeparation(SourceSeparatorBase):
         use_amplitude=False,
         amp_threshold_high=2.0,
         amp_threshold_low=0.5,
-        noise_cancel_mode='zero',
+        noise_cancel_mode="zero",
     ):
         super().__init__(mic_positions, sample_rate, chunk_size)
 
@@ -102,8 +102,13 @@ class AmplitudeRatioSeparation(SourceSeparatorBase):
         self.window = "hann"
         self.nperseg = chunk_size  # Use same as chunk_size for consistency
 
-    def update_separation_params(self, use_amplitude=None, amp_threshold_high=None, 
-                                 amp_threshold_low=None, noise_cancel_mode=None):
+    def update_separation_params(
+        self,
+        use_amplitude=None,
+        amp_threshold_high=None,
+        amp_threshold_low=None,
+        noise_cancel_mode=None,
+    ):
         """
         Update separation parameters dynamically.
 
@@ -155,21 +160,25 @@ class AmplitudeRatioSeparation(SourceSeparatorBase):
             # Multi-level mask with noise cancellation
             mask_left = np.zeros_like(amp_ratio, dtype=np.float32)
             mask_right = np.zeros_like(amp_ratio, dtype=np.float32)
-            
+
             # Strong left source: amp_ratio > threshold_high
             mask_left[amp_ratio > self.amp_threshold_high] = 1.0
-            
+
             # Strong right source: amp_ratio < threshold_low
             mask_right[amp_ratio < self.amp_threshold_low] = 1.0
-            
+
             # Mid-range: threshold_low <= amp_ratio <= threshold_high
-            if self.noise_cancel_mode == 'difference':
+            if self.noise_cancel_mode == "difference":
                 # Use amplitude difference for smoother separation
-                mid_range = (amp_ratio >= self.amp_threshold_low) & (amp_ratio <= self.amp_threshold_high)
+                mid_range = (amp_ratio >= self.amp_threshold_low) & (
+                    amp_ratio <= self.amp_threshold_high
+                )
                 # Normalize the ratio in mid-range to [0, 1]
-                normalized_ratio = (amp_ratio - 1.0) / (self.amp_threshold_high - self.amp_threshold_low)
+                normalized_ratio = (amp_ratio - 1.0) / (
+                    self.amp_threshold_high - self.amp_threshold_low
+                )
                 normalized_ratio = np.clip(normalized_ratio, 0.0, 1.0)
-                
+
                 mask_left[mid_range] = normalized_ratio[mid_range]
                 mask_right[mid_range] = 1.0 - normalized_ratio[mid_range]
             # else: noise_cancel_mode == 'zero', masks remain 0 for mid-range
@@ -271,8 +280,14 @@ def save_wav(signal, file_path, sample_rate):
     print(f"Saved: {file_path}")
 
 
-def test_with_wav_files(left_mic_path, right_mic_path, output_dir="./separated_output",
-                       amp_threshold_high=2.0, amp_threshold_low=0.5, noise_cancel_mode='zero'):
+def test_with_wav_files(
+    left_mic_path,
+    right_mic_path,
+    output_dir="./separated_output",
+    amp_threshold_high=2.0,
+    amp_threshold_low=0.5,
+    noise_cancel_mode="zero",
+):
     """
     Test source separation with real WAV files.
 
@@ -342,19 +357,19 @@ def test_with_wav_files(left_mic_path, right_mic_path, output_dir="./separated_o
     # Test both amplitude and phase-based separation
     for use_amp, method_name in [(True, "amplitude"), (False, "phase")]:
         print(f"\n--- {method_name.upper()}-based separation ---")
-        
+
         if use_amp:
             print(f"  Threshold high: {amp_threshold_high}")
             print(f"  Threshold low: {amp_threshold_low}")
             print(f"  Noise cancel mode: {noise_cancel_mode}")
 
         separator = AmplitudeRatioSeparation(
-            sample_rate=sample_rate, 
-            chunk_size=chunk_size, 
+            sample_rate=sample_rate,
+            chunk_size=chunk_size,
             use_amplitude=use_amp,
             amp_threshold_high=amp_threshold_high,
             amp_threshold_low=amp_threshold_low,
-            noise_cancel_mode=noise_cancel_mode
+            noise_cancel_mode=noise_cancel_mode,
         )
 
         if num_samples <= chunk_size:
@@ -452,36 +467,60 @@ if __name__ == "__main__":
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='Two-microphone source separation using amplitude ratio or phase difference',
+        description="Two-microphone source separation using amplitude ratio or phase difference",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Use default test files
   python sourceseparator.py
-  
+
   # Use custom audio files
   python sourceseparator.py left.wav right.wav
-  
+
   # With custom thresholds and noise cancellation
   python sourceseparator.py left.wav right.wav -o output/ --threshold-high 3.0 --threshold-low 0.33 --mode difference
-        """
+        """,
     )
-    
-    parser.add_argument('left_mic', nargs='?', default=default_left_mic,
-                       help='Path to left microphone WAV file (default: test_audio_left.wav)')
-    parser.add_argument('right_mic', nargs='?', default=default_right_mic,
-                       help='Path to right microphone WAV file (default: test_audio_right.wav)')
-    parser.add_argument('-o', '--output', default=default_output_dir,
-                       help='Output directory for separated files (default: ./separated_output)')
-    parser.add_argument('--threshold-high', type=float, default=2.0,
-                       help='Amplitude ratio above this assigns to left source (default: 2.0)')
-    parser.add_argument('--threshold-low', type=float, default=0.5,
-                       help='Amplitude ratio below this assigns to right source (default: 0.5)')
-    parser.add_argument('--mode', choices=['zero', 'difference'], default='zero',
-                       help="Noise cancellation mode: 'zero' (complete removal) or 'difference' (preserve quality) (default: zero)")
-    
+
+    parser.add_argument(
+        "left_mic",
+        nargs="?",
+        default=default_left_mic,
+        help="Path to left microphone WAV file (default: test_audio_left.wav)",
+    )
+    parser.add_argument(
+        "right_mic",
+        nargs="?",
+        default=default_right_mic,
+        help="Path to right microphone WAV file (default: test_audio_right.wav)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=default_output_dir,
+        help="Output directory for separated files (default: ./separated_output)",
+    )
+    parser.add_argument(
+        "--threshold-high",
+        type=float,
+        default=2.0,
+        help="Amplitude ratio above this assigns to left source (default: 2.0)",
+    )
+    parser.add_argument(
+        "--threshold-low",
+        type=float,
+        default=0.5,
+        help="Amplitude ratio below this assigns to right source (default: 0.5)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["zero", "difference"],
+        default="zero",
+        help="Noise cancellation mode: 'zero' (complete removal) or 'difference' (preserve quality) (default: zero)",
+    )
+
     args = parser.parse_args()
-    
+
     left_mic_path = args.left_mic
     right_mic_path = args.right_mic
     output_dir = args.output
@@ -505,5 +544,11 @@ Examples:
         print()
 
     # Test with audio files
-    test_with_wav_files(left_mic_path, right_mic_path, output_dir,
-                       amp_threshold_high, amp_threshold_low, noise_cancel_mode)
+    test_with_wav_files(
+        left_mic_path,
+        right_mic_path,
+        output_dir,
+        amp_threshold_high,
+        amp_threshold_low,
+        noise_cancel_mode,
+    )
